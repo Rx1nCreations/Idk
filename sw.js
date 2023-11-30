@@ -1,94 +1,81 @@
-/*!
-Copyright 2022 ChromeHack Team
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
-
+/// <reference lib="WebWorker" />
 "use strict";
 
-(() => {
-importScripts("/app.js");
-importScripts("/uv/uv.sw.js");
+((_) => {
+	/**
+	 * @type {ServiceWorkerGlobalScope}
+	 */
+	const self = _;
 
-const cacheName = `${location.hostname}-${app.cacheName}-${app.cacheVersion}`;
-const sw = new UVServiceWorker();
+	const cacheName = "f0dd3f25-22d6-4891-a28d-e778f511f1ed";
+	const hostname = self.location.hostname;
 
-async function install() {
-	const cache = await caches.open(cacheName);
-	await cache.addAll(app.cacheList);
-}
-
-/**
- * @param {Request} request 
- * @param {Response} response 
- */
-async function cache(request, response) {
-	try {
+	async function handleInstall() {
 		const cache = await caches.open(cacheName);
-		await cache.put(request, response.clone());
-	} catch(err) {
-		// ignore - this is usually caused by an unsupported request method
+		await cache.addAll(["sw.js", "manifest.json"]);
 	}
-}
 
-/**
- * @param {Request} request 
- */
-async function fetchRe(request) {
-	let response = await caches.match(request, { cacheName });
-	if (response == null) {
-		if (request.url.startsWith(sw.prefix)) {
-			response = await sw.fetch(request);
-		} else {
-			response = await fetch(request);
-			if (response.status == 0) {
-				return response; // cross origin responses
-			}
+	/**
+	 * @param {Request} request 
+	 */
+	async function handleFetch(request) {
+		const cached = await caches.match(request, { cacheName });
+		if (cached != null) {
+			return cached;
 		}
 
-		await cache(request, response);
+		const url = new URL(request.url);
+		switch (url.protocol) {
+			case "http:":
+			case "https:":
+				try {
+					const response = await self.fetch(request);
+					if (hostname !== "localhost" && url.pathname !== "/socket.io/") {
+						const cache = await caches.open(cacheName);
+						await cache.put(request, response.clone());
+					}
+
+					switch (response.type) {
+						case "cors":
+						case "basic":
+						case "default":
+							return new Response(response.body, {
+								status: response.status,
+								statusText: response.statusText,
+								headers: response.headers
+							});
+						default:
+							return response;
+					}
+				} catch (err) {
+					console.error(err);
+					return Response.error();
+				}
+			case "data:":
+			case "blob:":
+				return await self.fetch(request);
+			default:
+				console.error("Aborted");
+				return Response.error();
+		}
 	}
 
-	const headers = new Headers(response.headers);
-	const head = app.headers;
-	for (let h in head) {
-		headers.set(h, head[h]);
+	/**
+	 * @param {ExtendableMessageEvent} e 
+	 */
+	async function handleMessage(e) {
 	}
 
-	return new Response(response.body, {
-		status: response.status,
-		statusText: response.statusText,
-		headers
-	});
-}
-
-async function removeOldCaches() {
-	for (let k of await caches.keys()) {
-		if (k != cacheName)
-			await caches.delete(k);
+	async function handleActivate() {
+		for (const k of await caches.keys()) {
+			if (k != cacheName)
+				await caches.delete(k);
+		}
+		await self.clients.claim();
 	}
-}
 
-self.addEventListener("install", (event) => {
-	event.waitUntil(install());
-});
-
-self.addEventListener("fetch", (event) => {
-	event.respondWith(fetchRe(event.request));
-});
-
-self.addEventListener("activate", (event) => {
-	event.waitUntil(removeOldCaches());
-});
-
-})();
+	self.addEventListener("install", (e) => e.waitUntil(handleInstall()), { passive: true });
+	self.addEventListener("fetch", (e) => e.respondWith(handleFetch(e.request)), { passive: true });
+	self.addEventListener("message", (e) => e.waitUntil(handleMessage(e)), { passive: true });
+	self.addEventListener("activate", (e) => e.waitUntil(handleActivate()), { passive: true });
+})(self);
